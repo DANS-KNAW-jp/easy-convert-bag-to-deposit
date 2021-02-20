@@ -16,37 +16,36 @@
 package nl.knaw.dans.easy.bag2deposit.ddm
 
 import better.files.File
+import nl.knaw.dans.easy.bag2deposit.ddm.AcquisitionRewriteRule.rowsWithRegexp
 import nl.knaw.dans.easy.bag2deposit.parseCsv
 import nl.knaw.dans.lib.logging.DebugEnhancedLogging
+import org.apache.commons.csv.{ CSVFormat, CSVRecord }
 
 import java.util.UUID
+import scala.collection.generic.FilterMonadic
 import scala.xml.transform.RewriteRule
 import scala.xml.{ Elem, Node }
 
 case class AcquisitionRewriteRule(cfgDir: File) extends RewriteRule with DebugEnhancedLogging {
 
-  val titleMap: Map[String, Seq[UUID]] = {
-    val methods: Map[String, UUID] = parseCsv(cfgDir / "acquisitionMethods.csv", 1)
+  val acquisitionMap: Map[String, UUID] = {
+    rowsWithRegexp(cfgDir)
       .map(r =>
-        r.get(0) -> UUID.fromString(r.get(1))
+        r.get("regexp") -> UUID.fromString(r.get("uuid"))
       ).toMap
-
-    parseCsv(cfgDir / "acquisitionTitleMap.csv", 1)
-      .map(r =>
-        r.get(1) -> r.get(0).split("; *").toSeq
-          .map(s => methods.getOrElse(s, {
-            logger.warn(s"$s not found, will skip this for $r")
-            null
-          })).filter(Option(_).nonEmpty)
-      )
-      .toMap
   }
 
   override def transform(n: Node): Seq[Node] = {
     if (n.label != "title" && n.label != "alternative") n
-    else titleMap.get(n.text) // is an Option[Seq[UUID]]
-      .map(_.map(toMethod(n.text)))
-      .getOrElse(n) // TODO log if edit distance under some threshold? issues: spelling / word order
+    else {
+      val lowerCaseTitle = n.text.trim.toLowerCase
+      acquisitionMap
+        .withFilter { case (regexp, _) =>
+          lowerCaseTitle.matches(regexp)
+        }
+        .map { case (_, uuid) => toMethod(n.text)(uuid) }
+        .toSeq :+ n
+    }
   }
 
   private def toMethod(titleValue: String)(uuid: UUID): Elem = {
@@ -55,5 +54,19 @@ case class AcquisitionRewriteRule(cfgDir: File) extends RewriteRule with DebugEn
       valueURI={ s"https://data.cultureelerfgoed.nl/term/id/abr/$uuid" }
       subjectScheme="ABR verwervingswijzen"
     >{ titleValue }</ddm:acquisitionMethod>
+  }
+}
+object AcquisitionRewriteRule {
+  private val csvFormat = CSVFormat.RFC4180
+    .withHeader("hiddenLabel", "uuid", "prefLabel", "regexp")
+    .withDelimiter(',')
+    .withRecordSeparator('\n')
+    .withSkipHeaderRecord(true)
+
+  private val length = csvFormat.getHeader.length
+
+  def rowsWithRegexp(cfgDir: File): FilterMonadic[CSVRecord, Iterable[CSVRecord]] = {
+    parseCsv(cfgDir / "acquisitionMethods.csv", 0, AcquisitionRewriteRule.csvFormat)
+      .withFilter(_.size() == length)
   }
 }
